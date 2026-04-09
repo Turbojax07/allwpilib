@@ -11,6 +11,7 @@ import edu.wpi.first.hal.FRCNetComm.tInstances;
 import edu.wpi.first.hal.FRCNetComm.tResourceType;
 import edu.wpi.first.hal.HAL;
 import edu.wpi.first.hal.NotifierJNI;
+import edu.wpi.first.units.measure.Frequency;
 import edu.wpi.first.units.measure.Time;
 import java.util.PriorityQueue;
 
@@ -84,7 +85,7 @@ public class TimedRobot extends IterativeRobotBase {
   /**
    * Constructor for TimedRobot.
    *
-   * @param period Period in seconds.
+   * @param period The period of the robot loop function.
    */
   protected TimedRobot(double period) {
     super(period);
@@ -93,6 +94,24 @@ public class TimedRobot extends IterativeRobotBase {
     NotifierJNI.setNotifierName(m_notifier, "TimedRobot");
 
     HAL.report(tResourceType.kResourceType_Framework, tInstances.kFramework_Timed);
+  }
+
+  /**
+   * Constructor for TimedRobot.
+   *
+   * @param period The period of the robot loop function.
+   */
+  protected TimedRobot(Time period) {
+    this(period.in(Seconds));
+  }
+
+  /**
+   * Constructor for TimedRobot.
+   *
+   * @param frequency The frequency of the robot loop function.
+   */
+  protected TimedRobot(Frequency frequency) {
+    this(frequency.asPeriod());
   }
 
   @Override
@@ -162,9 +181,9 @@ public class TimedRobot extends IterativeRobotBase {
   }
 
   /**
-   * Return the system clock time in micrseconds for the start of the current periodic loop. This is
-   * in the same time base as Timer.getFPGATimestamp(), but is stable through a loop. It is updated
-   * at the beginning of every periodic callback (including the normal periodic loop).
+   * Return the system clock time in microseconds for the start of the current periodic loop. This
+   * is in the same time base as Timer.getFPGATimestamp(), but is stable through a loop. It is
+   * updated at the beginning of every periodic callback (including the normal periodic loop).
    *
    * @return Robot running time in microseconds, as of the start of the current periodic function.
    */

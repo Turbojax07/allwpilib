@@ -242,7 +242,11 @@ class WPILIB_DLLEXPORT Pose2d {
   }
 
   /**
-   * Returns the nearest Pose2d from a collection of poses
+   * Returns the nearest Pose2d from a collection of poses.
+   *
+   * If two or more poses in the collection have the same distance from this
+   * pose, return the one with the closest rotation component.
+   *
    * @param poses The collection of poses.
    * @return The nearest Pose2d from the collection.
    */
@@ -264,7 +268,11 @@ class WPILIB_DLLEXPORT Pose2d {
   }
 
   /**
-   * Returns the nearest Pose2d from a collection of poses
+   * Returns the nearest Pose2d from a collection of poses.
+   *
+   * If two or more poses in the collection have the same distance from this
+   * pose, return the one with the closest rotation component.
+   *
    * @param poses The collection of poses.
    * @return The nearest Pose2d from the collection.
    */
@@ -312,7 +320,7 @@ constexpr Transform2d Pose2d::operator-(const Pose2d& other) const {
 
 constexpr Pose2d Pose2d::TransformBy(const frc::Transform2d& other) const {
   return {m_translation + (other.Translation().RotateBy(m_rotation)),
-          other.Rotation() + m_rotation};
+          other.Rotation().RotateBy(m_rotation)};
 }
 
 constexpr Pose2d Pose2d::RelativeTo(const Pose2d& other) const {

@@ -5,23 +5,21 @@
 package edu.wpi.first.math.estimator;
 
 import edu.wpi.first.math.MathSharedStore;
+import edu.wpi.first.math.MathUsageId;
 import edu.wpi.first.math.MathUtil;
 import edu.wpi.first.math.Matrix;
-import edu.wpi.first.math.Nat;
-import edu.wpi.first.math.VecBuilder;
 import edu.wpi.first.math.geometry.Pose2d;
 import edu.wpi.first.math.geometry.Pose3d;
 import edu.wpi.first.math.geometry.Rotation2d;
 import edu.wpi.first.math.geometry.Rotation3d;
+import edu.wpi.first.math.geometry.Transform3d;
 import edu.wpi.first.math.geometry.Translation2d;
 import edu.wpi.first.math.geometry.Translation3d;
-import edu.wpi.first.math.geometry.Twist3d;
 import edu.wpi.first.math.interpolation.TimeInterpolatableBuffer;
 import edu.wpi.first.math.kinematics.Kinematics;
 import edu.wpi.first.math.kinematics.Odometry3d;
 import edu.wpi.first.math.numbers.N1;
 import edu.wpi.first.math.numbers.N4;
-import edu.wpi.first.math.numbers.N6;
 import java.util.NavigableMap;
 import java.util.Optional;
 import java.util.TreeMap;
@@ -47,8 +45,12 @@ import java.util.TreeMap;
  */
 public class PoseEstimator3d<T> {
   private final Odometry3d<T> m_odometry;
-  private final Matrix<N4, N1> m_q = new Matrix<>(Nat.N4(), Nat.N1());
-  private final Matrix<N6, N6> m_visionK = new Matrix<>(Nat.N6(), Nat.N6());
+
+  // Diagonal of process noise covariance matrix Q
+  private final double[] m_q = new double[] {0.0, 0.0, 0.0, 0.0};
+
+  // Diagonal of Kalman gain matrix K
+  private final double[] m_vision_k = new double[] {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
 
   private static final double kBufferDuration = 1.5;
   // Maps timestamps to odometry-only pose estimates
@@ -56,7 +58,9 @@ public class PoseEstimator3d<T> {
       TimeInterpolatableBuffer.createBuffer(kBufferDuration);
   // Maps timestamps to vision updates
   // Always contains one entry before the oldest entry in m_odometryPoseBuffer, unless there have
-  // been no vision measurements after the last reset
+  // been no vision measurements after the last reset. May contain one entry while
+  // m_odometryPoseBuffer is empty to correct for translation/rotation after a call to
+  // ResetRotation/ResetTranslation.
   private final NavigableMap<Double, VisionUpdate> m_visionUpdates = new TreeMap<>();
 
   private Pose3d m_poseEstimate;
@@ -84,9 +88,10 @@ public class PoseEstimator3d<T> {
     m_poseEstimate = m_odometry.getPoseMeters();
 
     for (int i = 0; i < 4; ++i) {
-      m_q.set(i, 0, stateStdDevs.get(i, 0) * stateStdDevs.get(i, 0));
+      m_q[i] = stateStdDevs.get(i, 0) * stateStdDevs.get(i, 0);
     }
     setVisionMeasurementStdDevs(visionMeasurementStdDevs);
+    MathSharedStore.getMathShared().reportUsage(MathUsageId.kEstimator_PoseEstimator3d, 1);
   }
 
   /**
@@ -99,6 +104,7 @@ public class PoseEstimator3d<T> {
    *     theta]ᵀ, with units in meters and radians.
    */
   public final void setVisionMeasurementStdDevs(Matrix<N4, N1> visionMeasurementStdDevs) {
+    // Diagonal of measurement covariance matrix R
     var r = new double[4];
     for (int i = 0; i < 4; ++i) {
       r[i] = visionMeasurementStdDevs.get(i, 0) * visionMeasurementStdDevs.get(i, 0);
@@ -107,17 +113,16 @@ public class PoseEstimator3d<T> {
     // Solve for closed form Kalman gain for continuous Kalman filter with A = 0
     // and C = I. See wpimath/algorithms.md.
     for (int row = 0; row < 4; ++row) {
-      if (m_q.get(row, 0) == 0.0) {
-        m_visionK.set(row, row, 0.0);
+      if (m_q[row] == 0.0) {
+        m_vision_k[row] = 0.0;
       } else {
-        m_visionK.set(
-            row, row, m_q.get(row, 0) / (m_q.get(row, 0) + Math.sqrt(m_q.get(row, 0) * r[row])));
+        m_vision_k[row] = m_q[row] / (m_q[row] + Math.sqrt(m_q[row] * r[row]));
       }
     }
     // Fill in the gains for the other components of the rotation vector
-    double angle_gain = m_visionK.get(3, 3);
-    m_visionK.set(4, 4, angle_gain);
-    m_visionK.set(5, 5, angle_gain);
+    double angle_gain = m_vision_k[3];
+    m_vision_k[4] = angle_gain;
+    m_vision_k[5] = angle_gain;
   }
 
   /**
@@ -157,9 +162,22 @@ public class PoseEstimator3d<T> {
    */
   public void resetTranslation(Translation3d translation) {
     m_odometry.resetTranslation(translation);
+
+    final var latestVisionUpdate = m_visionUpdates.lastEntry();
     m_odometryPoseBuffer.clear();
     m_visionUpdates.clear();
-    m_poseEstimate = m_odometry.getPoseMeters();
+
+    if (latestVisionUpdate != null) {
+      // apply vision compensation to the pose rotation
+      final var visionUpdate =
+          new VisionUpdate(
+              new Pose3d(translation, latestVisionUpdate.getValue().visionPose.getRotation()),
+              new Pose3d(translation, latestVisionUpdate.getValue().odometryPose.getRotation()));
+      m_visionUpdates.put(latestVisionUpdate.getKey(), visionUpdate);
+      m_poseEstimate = visionUpdate.compensate(m_odometry.getPoseMeters());
+    } else {
+      m_poseEstimate = m_odometry.getPoseMeters();
+    }
   }
 
   /**
@@ -169,9 +187,22 @@ public class PoseEstimator3d<T> {
    */
   public void resetRotation(Rotation3d rotation) {
     m_odometry.resetRotation(rotation);
+
+    final var latestVisionUpdate = m_visionUpdates.lastEntry();
     m_odometryPoseBuffer.clear();
     m_visionUpdates.clear();
-    m_poseEstimate = m_odometry.getPoseMeters();
+
+    if (latestVisionUpdate != null) {
+      // apply vision compensation to the pose translation
+      final var visionUpdate =
+          new VisionUpdate(
+              new Pose3d(latestVisionUpdate.getValue().visionPose.getTranslation(), rotation),
+              new Pose3d(latestVisionUpdate.getValue().odometryPose.getTranslation(), rotation));
+      m_visionUpdates.put(latestVisionUpdate.getKey(), visionUpdate);
+      m_poseEstimate = visionUpdate.compensate(m_odometry.getPoseMeters());
+    } else {
+      m_poseEstimate = m_odometry.getPoseMeters();
+    }
   }
 
   /**
@@ -286,33 +317,31 @@ public class PoseEstimator3d<T> {
       return;
     }
 
-    // Step 4: Measure the twist between the old pose estimate and the vision pose.
-    var twist = visionSample.get().log(visionRobotPoseMeters);
+    // Step 4: Measure the transform between the old pose estimate and the vision pose.
+    var transform = visionRobotPoseMeters.minus(visionSample.get());
 
-    // Step 5: We should not trust the twist entirely, so instead we scale this twist by a Kalman
-    // gain matrix representing how much we trust vision measurements compared to our current pose.
-    var k_times_twist =
-        m_visionK.times(
-            VecBuilder.fill(twist.dx, twist.dy, twist.dz, twist.rx, twist.ry, twist.rz));
+    // Step 5: We should not trust the transform entirely, so instead we scale this transform by a
+    // Kalman gain matrix representing how much we trust vision measurements compared to our current
+    // pose. Then we convert the result back to a Transform3d.
+    var scaledTransform =
+        new Transform3d(
+            m_vision_k[0] * transform.getX(),
+            m_vision_k[1] * transform.getY(),
+            m_vision_k[2] * transform.getZ(),
+            new Rotation3d(
+                m_vision_k[3] * transform.getRotation().getX(),
+                m_vision_k[4] * transform.getRotation().getY(),
+                m_vision_k[5] * transform.getRotation().getZ()));
 
-    // Step 6: Convert back to Twist3d.
-    var scaledTwist =
-        new Twist3d(
-            k_times_twist.get(0, 0),
-            k_times_twist.get(1, 0),
-            k_times_twist.get(2, 0),
-            k_times_twist.get(3, 0),
-            k_times_twist.get(4, 0),
-            k_times_twist.get(5, 0));
-
-    // Step 7: Calculate and record the vision update.
-    var visionUpdate = new VisionUpdate(visionSample.get().exp(scaledTwist), odometrySample.get());
+    // Step 6: Calculate and record the vision update.
+    var visionUpdate =
+        new VisionUpdate(visionSample.get().plus(scaledTransform), odometrySample.get());
     m_visionUpdates.put(timestampSeconds, visionUpdate);
 
-    // Step 8: Remove later vision measurements. (Matches previous behavior)
+    // Step 7: Remove later vision measurements. (Matches previous behavior)
     m_visionUpdates.tailMap(timestampSeconds, false).entrySet().clear();
 
-    // Step 9: Update latest pose estimate. Since we cleared all updates after this vision update,
+    // Step 8: Update latest pose estimate. Since we cleared all updates after this vision update,
     // it's guaranteed to be the latest vision update.
     m_poseEstimate = visionUpdate.compensate(m_odometry.getPoseMeters());
   }

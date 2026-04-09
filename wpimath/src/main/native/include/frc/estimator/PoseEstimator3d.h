@@ -14,9 +14,10 @@
 #include <wpi/array.h>
 
 #include "frc/EigenCore.h"
-#include "frc/geometry/Pose2d.h"
-#include "frc/geometry/Rotation2d.h"
-#include "frc/geometry/Translation2d.h"
+#include "frc/geometry/Pose3d.h"
+#include "frc/geometry/Rotation3d.h"
+#include "frc/geometry/Transform3d.h"
+#include "frc/geometry/Translation3d.h"
 #include "frc/interpolation/TimeInterpolatableBuffer.h"
 #include "frc/kinematics/Kinematics.h"
 #include "frc/kinematics/Odometry3d.h"
@@ -75,6 +76,8 @@ class WPILIB_DLLEXPORT PoseEstimator3d {
     }
 
     SetVisionMeasurementStdDevs(visionMeasurementStdDevs);
+    wpi::math::MathSharedStore::ReportUsage(
+        wpi::math::MathUsageId::kEstimator_PoseEstimator3d, 1);
   }
 
   /**
@@ -89,6 +92,7 @@ class WPILIB_DLLEXPORT PoseEstimator3d {
    */
   void SetVisionMeasurementStdDevs(
       const wpi::array<double, 4>& visionMeasurementStdDevs) {
+    // Diagonal of measurement noise covariance matrix R
     wpi::array<double, 4> r{wpi::empty_array};
     for (size_t i = 0; i < 4; ++i) {
       r[i] = visionMeasurementStdDevs[i] * visionMeasurementStdDevs[i];
@@ -98,15 +102,15 @@ class WPILIB_DLLEXPORT PoseEstimator3d {
     // and C = I. See wpimath/algorithms.md.
     for (size_t row = 0; row < 4; ++row) {
       if (m_q[row] == 0.0) {
-        m_visionK(row, row) = 0.0;
+        m_vision_K.diagonal()[row] = 0.0;
       } else {
-        m_visionK(row, row) =
+        m_vision_K.diagonal()[row] =
             m_q[row] / (m_q[row] + std::sqrt(m_q[row] * r[row]));
       }
     }
-    double angle_gain = m_visionK(3, 3);
-    m_visionK(4, 4) = angle_gain;
-    m_visionK(5, 5) = angle_gain;
+    double angle_gain = m_vision_K.diagonal()[3];
+    m_vision_K.diagonal()[4] = angle_gain;
+    m_vision_K.diagonal()[5] = angle_gain;
   }
 
   /**
@@ -145,24 +149,70 @@ class WPILIB_DLLEXPORT PoseEstimator3d {
    *
    * @param translation The pose to translation to.
    */
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
+#endif  // defined(__GNUC__) && !defined(__clang__)
   void ResetTranslation(const Translation3d& translation) {
     m_odometry.ResetTranslation(translation);
+
+    const std::optional<std::pair<units::second_t, VisionUpdate>>
+        latestVisionUpdate =
+            m_visionUpdates.empty() ? std::nullopt
+                                    : std::optional{*m_visionUpdates.crbegin()};
     m_odometryPoseBuffer.Clear();
     m_visionUpdates.clear();
-    m_poseEstimate = m_odometry.GetPose();
+
+    if (latestVisionUpdate) {
+      // apply vision compensation to the pose rotation
+      const VisionUpdate visionUpdate{
+          Pose3d{translation, latestVisionUpdate->second.visionPose.Rotation()},
+          Pose3d{translation,
+                 latestVisionUpdate->second.odometryPose.Rotation()}};
+      m_visionUpdates[latestVisionUpdate->first] = visionUpdate;
+      m_poseEstimate = visionUpdate.Compensate(m_odometry.GetPose());
+    } else {
+      m_poseEstimate = m_odometry.GetPose();
+    }
   }
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic pop
+#endif  // defined(__GNUC__) && !defined(__clang__)
 
   /**
    * Resets the robot's rotation.
    *
    * @param rotation The rotation to reset to.
    */
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
+#endif  // defined(__GNUC__) && !defined(__clang__)
   void ResetRotation(const Rotation3d& rotation) {
     m_odometry.ResetRotation(rotation);
+
+    const std::optional<std::pair<units::second_t, VisionUpdate>>
+        latestVisionUpdate =
+            m_visionUpdates.empty() ? std::nullopt
+                                    : std::optional{*m_visionUpdates.crbegin()};
     m_odometryPoseBuffer.Clear();
     m_visionUpdates.clear();
-    m_poseEstimate = m_odometry.GetPose();
+
+    if (latestVisionUpdate) {
+      // apply vision compensation to the pose translation
+      const VisionUpdate visionUpdate{
+          Pose3d{latestVisionUpdate->second.visionPose.Translation(), rotation},
+          Pose3d{latestVisionUpdate->second.odometryPose.Translation(),
+                 rotation}};
+      m_visionUpdates[latestVisionUpdate->first] = visionUpdate;
+      m_poseEstimate = visionUpdate.Compensate(m_odometry.GetPose());
+    } else {
+      m_poseEstimate = m_odometry.GetPose();
+    }
   }
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic pop
+#endif  // defined(__GNUC__) && !defined(__clang__)
 
   /**
    * Gets the estimated robot pose.
@@ -270,26 +320,32 @@ class WPILIB_DLLEXPORT PoseEstimator3d {
       return;
     }
 
-    // Step 4: Measure the twist between the old pose estimate and the vision
-    // pose.
-    auto twist = visionSample.value().Log(visionRobotPose);
+    // Step 4: Measure the transform between the old pose estimate and the
+    // vision pose.
+    auto transform = visionRobotPose - visionSample.value();
 
-    // Step 5: We should not trust the twist entirely, so instead we scale this
-    // twist by a Kalman gain matrix representing how much we trust vision
-    // measurements compared to our current pose.
-    frc::Vectord<6> k_times_twist =
-        m_visionK * frc::Vectord<6>{twist.dx.value(), twist.dy.value(),
-                                    twist.dz.value(), twist.rx.value(),
-                                    twist.ry.value(), twist.rz.value()};
+    // Step 5: We should not trust the transform entirely, so instead we scale
+    // this transform by a Kalman gain matrix representing how much we trust
+    // vision measurements compared to our current pose.
+    frc::Vectord<6> k_times_transform =
+        m_vision_K * frc::Vectord<6>{transform.X().value(),
+                                     transform.Y().value(),
+                                     transform.Z().value(),
+                                     transform.Rotation().X().value(),
+                                     transform.Rotation().Y().value(),
+                                     transform.Rotation().Z().value()};
 
-    // Step 6: Convert back to Twist3d.
-    Twist3d scaledTwist{
-        units::meter_t{k_times_twist(0)},  units::meter_t{k_times_twist(1)},
-        units::meter_t{k_times_twist(2)},  units::radian_t{k_times_twist(3)},
-        units::radian_t{k_times_twist(4)}, units::radian_t{k_times_twist(5)}};
+    // Step 6: Convert back to Transform3d.
+    Transform3d scaledTransform{
+        units::meter_t{k_times_transform(0)},
+        units::meter_t{k_times_transform(1)},
+        units::meter_t{k_times_transform(2)},
+        Rotation3d{units::radian_t{k_times_transform(3)},
+                   units::radian_t{k_times_transform(4)},
+                   units::radian_t{k_times_transform(5)}}};
 
     // Step 7: Calculate and record the vision update.
-    VisionUpdate visionUpdate{visionSample->Exp(scaledTwist), *odometrySample};
+    VisionUpdate visionUpdate{*visionSample + scaledTransform, *odometrySample};
     m_visionUpdates[timestamp] = visionUpdate;
 
     // Step 8: Remove later vision measurements. (Matches previous behavior)
@@ -435,14 +491,21 @@ class WPILIB_DLLEXPORT PoseEstimator3d {
   static constexpr units::second_t kBufferDuration = 1.5_s;
 
   Odometry3d<WheelSpeeds, WheelPositions>& m_odometry;
+
+  // Diagonal of process noise covariance matrix Q
   wpi::array<double, 4> m_q{wpi::empty_array};
-  frc::Matrixd<6, 6> m_visionK = frc::Matrixd<6, 6>::Zero();
+
+  // Kalman gain matrix K
+  Eigen::DiagonalMatrix<double, 6> m_vision_K =
+      Eigen::DiagonalMatrix<double, 6>::Zero();
 
   // Maps timestamps to odometry-only pose estimates
   TimeInterpolatableBuffer<Pose3d> m_odometryPoseBuffer{kBufferDuration};
   // Maps timestamps to vision updates
   // Always contains one entry before the oldest entry in m_odometryPoseBuffer,
-  // unless there have been no vision measurements after the last reset
+  // unless there have been no vision measurements after the last reset. May
+  // contain one entry while m_odometryPoseBuffer is empty to correct for
+  // translation/rotation after a call to ResetRotation/ResetTranslation.
   std::map<units::second_t, VisionUpdate> m_visionUpdates;
 
   Pose3d m_poseEstimate;

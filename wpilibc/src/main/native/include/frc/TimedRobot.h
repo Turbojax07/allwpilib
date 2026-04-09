@@ -11,6 +11,7 @@
 
 #include <hal/Notifier.h>
 #include <hal/Types.h>
+#include <units/frequency.h>
 #include <units/math.h>
 #include <units/time.h>
 #include <wpi/priority_queue.h>
@@ -47,9 +48,16 @@ class TimedRobot : public IterativeRobotBase {
   /**
    * Constructor for TimedRobot.
    *
-   * @param period Period.
+   * @param period The period of the robot loop function.
    */
   explicit TimedRobot(units::second_t period = kDefaultPeriod);
+
+  /**
+   * Constructor for TimedRobot.
+   *
+   * @param frequency The frequency of the robot loop function.
+   */
+  explicit TimedRobot(units::hertz_t frequency);
 
   TimedRobot(TimedRobot&&) = default;
   TimedRobot& operator=(TimedRobot&&) = default;
@@ -57,7 +65,7 @@ class TimedRobot : public IterativeRobotBase {
   ~TimedRobot() override;
 
   /**
-   * Return the system clock time in micrseconds for the start of the current
+   * Return the system clock time in microseconds for the start of the current
    * periodic loop. This is in the same time base as Timer.GetFPGATimestamp(),
    * but is stable through a loop. It is updated at the beginning of every
    * periodic callback (including the normal periodic loop).

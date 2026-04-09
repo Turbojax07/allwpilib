@@ -285,7 +285,6 @@ public final class DriverStation {
       System.arraycopy(axes.m_axes, 0, m_prevAxes.m_axes, 0, count);
     }
 
-    @SuppressWarnings("PMD.AvoidArrayLoops")
     void appendPOVs(HALJoystickPOVs povs, long timestamp) {
       int count = povs.m_count;
       if (m_sizedPOVs == null || m_sizedPOVs.length != count) {
@@ -1183,8 +1182,7 @@ public final class DriverStation {
    *
    * <p>When the DS is in practice mode, this number is a floating point number, and counts down.
    *
-   * <p>When the DS is in teleop or autonomous mode, this number is a floating point number, and
-   * counts up.
+   * <p>When the DS is in teleop or autonomous mode, this number returns -1.0.
    *
    * <p>Simulation matches DS behavior without an FMS connected.
    *

@@ -71,11 +71,11 @@ void glass::DisplayFMS(FMSModel* model, bool editableDsAttached) {
     }
     ImGui::SameLine();
     if (ImGui::Button("Auto") && !enabled) {
-      model->SetMatchTime(15.0);
+      model->SetMatchTime(20.0);
     }
     ImGui::SameLine();
     if (ImGui::Button("Teleop") && !enabled) {
-      model->SetMatchTime(135.0);
+      model->SetMatchTime(140.0);
     }
   }
 
@@ -148,11 +148,14 @@ void glass::DisplayFMSReadOnly(FMSModel* model) {
       ImGui::TextUnformatted("?");
     }
   }
-
-  wpi::SmallString<64> gameSpecificMessageBuf;
-  std::string_view gameSpecificMessage =
-      model->GetGameSpecificMessage(gameSpecificMessageBuf);
-  ImGui::Text("Game Specific: %s", exists ? gameSpecificMessage.data() : "?");
+  if (exists) {
+    wpi::SmallString<64> gsmBuf;
+    std::string_view gsm = model->GetGameSpecificMessage(gsmBuf);
+    ImGui::Text("Game Specific: %.*s", static_cast<int>(gsm.size()),
+                gsm.data());
+  } else {
+    ImGui::TextUnformatted("Game Specific: ?");
+  }
 
   if (!exists) {
     ImGui::PopStyleColor();
